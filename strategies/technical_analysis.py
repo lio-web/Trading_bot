@@ -88,6 +88,99 @@ class TechnicalAnalysis:
         return (upper_wick >= 2 * body) and (lower_wick <= body * 0.5)
 
     @staticmethod
+    def identify_fvgs(df):
+        """
+        Identifies Fair Value Gaps (FVG) using the last 3 candles.
+        Bullish FVG: Low of candle 3 > High of candle 1
+        Bearish FVG: High of candle 3 < Low of candle 1
+        """
+        if len(df) < 3:
+            return None
+        
+        c1 = df.iloc[-3]
+        c3 = df.iloc[-1]
+
+        if c3['low'] > c1['high']:
+            return {"type": "Bullish", "bottom": c1['high'], "top": c3['low']}
+        elif c3['high'] < c1['low']:
+            return {"type": "Bearish", "top": c1['low'], "bottom": c3['high']}
+        
+        return None
+
+    @staticmethod
+    def identify_order_blocks(df, lookback=20):
+        """
+        Simple Order Block (OB) identification within a recent lookback window.
+        """
+        if len(df) < lookback:
+            return None
+        
+        recent_df = df.iloc[-lookback:]
+        
+        # Bullish OB (Red candle at local bottom)
+        low_idx = recent_df['low'].idxmin()
+        ob_b_candle = recent_df.loc[low_idx]
+        
+        if ob_b_candle['close'] < ob_b_candle['open']:
+            return {"type": "Bullish", "top": ob_b_candle['high'], "bottom": ob_b_candle['low']}
+                
+        # Bearish OB (Green candle at local top)
+        high_idx = recent_df['high'].idxmax()
+        ob_br_candle = recent_df.loc[high_idx]
+        if ob_br_candle['close'] > ob_br_candle['open']:
+            return {"type": "Bearish", "top": ob_br_candle['high'], "bottom": ob_br_candle['low']}
+                
+        return None
+
+    @staticmethod
+    def identify_liquidity(df, window=5):
+        """
+        Identifies significant swing highs and lows as liquidity pools.
+        """
+        if len(df) < window * 2 + 1:
+            return None
+            
+        recent_df = df.iloc[-(window*2 + 1):]
+        middle_idx = recent_df.index[window]
+        middle_candle = recent_df.loc[middle_idx]
+        
+        is_swing_high = True
+        is_swing_low = True
+        
+        for i in recent_df.index:
+            if i == middle_idx:
+                continue
+            if recent_df['high'].loc[i] >= middle_candle['high']:
+                is_swing_high = False
+            if recent_df['low'].loc[i] <= middle_candle['low']:
+                is_swing_low = False
+                
+        if is_swing_high:
+            return {"type": "BuySide", "level": middle_candle['high']}
+        elif is_swing_low:
+            return {"type": "SellSide", "level": middle_candle['low']}
+            
+        return None
+
+    @staticmethod
+    def identify_trend(df, lookback=50):
+        """
+        Basic trend identification using moving highs and lows.
+        """
+        if len(df) < lookback:
+            return "Neutral"
+        
+        start_price = df.iloc[-lookback]['close']
+        end_price = df.iloc[-1]['close']
+        
+        if end_price > start_price * 1.005:
+            return "Uptrend"
+        elif end_price < start_price * 0.995:
+            return "Downtrend"
+            
+        return "Neutral"
+
+    @staticmethod
     def check_signals(df):
         """
         Analyzes the latest candle to generate buy/sell signals.
@@ -127,20 +220,42 @@ class TechnicalAnalysis:
         elif TechnicalAnalysis.is_shooting_star(latest):
             pattern = "Shooting Star"
             
-        # BUY Logic (Confluence)
-        # 1. Price near lower band
-        # 2. RSI oversold OR (RSI low-ish AND Bullish Pattern)
-        if close < bbl or (close < bbl * 1.001): # Near Lower Band
-            if (rsi < 30 and stoch_k < 20): # Classic Strong Signal
+        # Identify SMC Concepts
+        fvg = TechnicalAnalysis.identify_fvgs(df)
+        ob = TechnicalAnalysis.identify_order_blocks(df)
+        trend = TechnicalAnalysis.identify_trend(df)
+        
+        # Basic Strategy combining traditional and SMC
+        if pattern and not signal:
+            if pattern in ["Bullish Engulfing", "Hammer"] and (close < bbl or rsi < 40 or trend == "Uptrend"):
                 signal = "BUY"
-            elif (rsi < 45 and pattern in ["Bullish Engulfing", "Hammer"]): # Pattern Confirmation
+            elif pattern in ["Bearish Engulfing", "Shooting Star"] and (close > bbu or rsi > 60 or trend == "Downtrend"):
+                signal = "SELL"
+                
+        # SMC Confluence: Tap into FVG or OB
+        if fvg:
+            if fvg['type'] == 'Bullish' and fvg['bottom'] <= close <= fvg['top'] and trend != "Downtrend":
                 signal = "BUY"
-            
-        # SELL Logic (Confluence)
-        elif close > bbu or (close > bbu * 0.999): # Near Upper Band
-            if (rsi > 70 and stoch_k > 80): # Classic Strong Signal
+                pattern = "Bullish FVG Tap"
+            elif fvg['type'] == 'Bearish' and fvg['bottom'] <= close <= fvg['top'] and trend != "Uptrend":
                 signal = "SELL"
-            elif (rsi > 55 and pattern in ["Bearish Engulfing", "Shooting Star"]): # Pattern Confirmation
+                pattern = "Bearish FVG Tap"
+                
+        if ob and not signal:
+            if ob['type'] == 'Bullish' and ob['bottom'] <= close <= ob['top'] and trend != "Downtrend":
+                signal = "BUY"
+                pattern = "Bullish OB Tap"
+            elif ob['type'] == 'Bearish' and ob['bottom'] <= close <= ob['top'] and trend != "Uptrend":
                 signal = "SELL"
-            
+                pattern = "Bearish OB Tap"
+                
+        # Classic Strong Signal (RSI + Stoch)
+        if not signal:
+            if close < bbl and rsi < 30 and stoch_k < 20:
+                signal = "BUY"
+                pattern = "Classic Oversold"
+            elif close > bbu and rsi > 70 and stoch_k > 80:
+                signal = "SELL"
+                pattern = "Classic Overbought"
+
         return signal, pattern
